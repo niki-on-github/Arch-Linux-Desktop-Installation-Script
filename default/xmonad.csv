@@ -1,0 +1,12 @@
+#GID,DESCRIPTION
+sys-base,"system base packages"
+xorg,"basic packages for xorg"
+login,"login manager"
+font,"all font packages"
+zsh,"Z shell packages"
+breeze,"breeze theme packages"
+wm-base,"window manager base packages"
+wm-x11,"x11 window manager base packages"
+wm-xmonad,"xmonad window manager"
+apps,"useful apps for daily use"
+
