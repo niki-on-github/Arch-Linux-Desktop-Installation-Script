@@ -1,7 +1,7 @@
 #GID,DESCRIPTION
 sys-base,"system base packages"
 xorg,"basic packages for xorg"
-login,"login manager"
+sddm,"login manager"
 font,"all font packages"
 zsh,"Z shell packages"
 breeze,"breeze theme packages"

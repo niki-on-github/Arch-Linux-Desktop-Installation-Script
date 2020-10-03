@@ -1,0 +1,4 @@
+#GID,DESCRIPTION
+sys-base,"system base packages"
+font,"all font packages"
+zsh,"Z shell packages"

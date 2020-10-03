@@ -100,7 +100,8 @@ welcomeMsg() {
 
 refreshKeys() {
     dialog --infobox "Refreshing Arch Keyring ..." 4 40
-    pacman --noconfirm -Sy archlinux-keyring >/dev/null 2>&1 || error "Refreshing Arch Keyring failed"
+    pacman --noconfirm -Sy archlinux-keyring >/dev/null 2>&1 || error "Refreshing Arch Keyring failed (maybe /var/lib/pacman/db.lck exists)"
+    pacman-key --refresh-keys >/dev/null 2>&1
 }
 
 repoInstall() {
@@ -122,6 +123,12 @@ runCommands() {
         [ $? -ne 0 ] && [ "$tryCommand" = "false" ] && error "RunPostCommand: $instruction failed"
     done
     unset IFS
+}
+
+npmInstall() {
+    pacman --noconfirm --needed -S npm >> /tmp/install.log 2>&1
+    dialog --title "Installation ($n of $totalPKGs)" --infobox "Installing \`$1\` via npm \\n> $2" 5 70
+    npm install -g "$1" >> /tmp/install.log 2>&1 || error "Installation of npm package $1 failed"
 }
 
 gitInstall() {
@@ -205,10 +212,16 @@ installPackages() {
     systemUpdate "fix pkg confilicts for outdated systems"
 
     [ ! -f /tmp/pkg_filtered.csv ] && return
+    [ -f /usr/lib/systemd/system/grub-btrfs.path ] && systemctl stop grub-btrfs.path  # tmp disable grub-btrfs
+    pacman -Qs snap-pac >/dev/null && snap_pac_installed=true || snap_pac_installed=false
+    [ "$snap_pac_installed" = true ] && pacman --noconfirm -Rdd snap-pac >/dev/null
     totalPKGs=$(wc -l < /tmp/pkg_filtered.csv)
     n=$((0))
     while IFS=, read -r gid tag program preCommands postCommands comment; do
         n=$((n+1))
+        if [ "$(($n % 25))" -ge "24" ]; then
+            [ -f /usr/lib/snapper/systemd-helper ] && /usr/lib/snapper/systemd-helper --cleanup >/dev/null
+        fi
         [ -z "$comment" ] && error "Broken Entry in line $n (/tmp/pkg_filtered.csv)"
         echo "$preCommands" | grep "^\".*\"$" >/dev/null 2>&1 && preCommands="$(echo "$preCommands" | sed "s/\(^\"\|\"$\)//g")"
         echo "$postCommands" | grep "^\".*\"$" >/dev/null 2>&1 && postCommands="$(echo "$postCommands" | sed "s/\(^\"\|\"$\)//g")"
@@ -217,12 +230,14 @@ installPackages() {
             "A") runCommands "$preCommands" && aurInstall "$program" "$comment" && runCommands "$postCommands" ;;
             "P") runCommands "$preCommands" && pipInstall "$program" "$comment" && runCommands "$postCommands" ;;
             "R") runCommands "$preCommands" && repoInstall "$program" "$comment" && runCommands "$postCommands" ;;
+            "N") runCommands "$preCommands" && npmInstall "$program" "$comment" && runCommands "$postCommands" ;;
             "G") runCommands "$preCommands" && gitInstall "$program" "$postCommands" "$comment" ;;
             "C") runCommands "$preCommands" && cmdInstall "$program" "$postCommands" "$comment" ;;
             *) error "Unknown Tag in line $n (/tmp/pkg_filtered.csv)" ;;
         esac
     done < /tmp/pkg_filtered.csv
     unset IFS
+    [ "$snap_pac_installed" = true ] && pacman --noconfirm -S snap-pac >/dev/null
 
     cd $workingDirectory
 }
@@ -251,6 +266,14 @@ installDotfiles() {
     [ -z "$branch" ] && branch="master"
     sudo -u "$username" git --git-dir=/home/$username/.dotfiles --work-tree=/home/$username checkout -f $branch
     sudo -u "$username" git --git-dir=/home/$username/.dotfiles --work-tree=/home/$username config --local status.showUntrackedFiles no
+    sudo -u "$username" git --git-dir=/home/$username/.dotfiles --work-tree=/home/$username submodule update --remote
+
+    if [ -f /home/$username/.config/pacman/install_pacman_hooks.sh ]; then
+        dialog --infobox "Install pacman hooks from dotfiles" 4 60
+        cd /home/$username/.config/pacman
+        bash /home/$username/.config/pacman/install_pacman_hooks.sh >> /tmp/install.log 2>&1
+        cd -
+    fi
 
     if [ -d /home/$username/.config/dmenu/src ]; then
         dialog --infobox "Install dmenu from dotfiles" 4 60
@@ -262,6 +285,11 @@ installDotfiles() {
         dialog --infobox "Install dwm from dotfiles" 4 60
         pacman --noconfirm -Rdd dwm >/dev/null 2>&1
         cd /home/$username/.config/dwm/src && make clean install >> /tmp/install.log 2>&1
+    fi
+
+    if [ -d /home/$username/.config/xmonad ]; then
+        dialog --infobox "Compile Xmonad source files from dotfiles" 4 60
+        command -v xmonad >/dev/null && sudo -u "$username" xmonad --recompile >> /tmp/install.log 2>&1
     fi
 
     cd $workingDirectory
@@ -278,35 +306,6 @@ setupLocale() {
     localectl set-keymap $KEYMAP
     localectl set-x11-keymap $X11_KEYMAP
     localectl set-locale LANG=$LANG
-}
-
-# NOTE: The script does not work in the chroot environment, so it is included in this installer.
-setup_snapper() {
-   [ -d /.snapshots ] || return # continue only if we have a common btrfs structure
-   [ -f /etc/snapper/configs/root ] && return
-   dialog --title "Installation" --infobox "Setup snapper for btrfs snapshots" 5 70
-   pacman --noconfirm --needed -S snapper snap-pac >> /tmp/install.log 2>&1 || error "Installation of snapper failed\n\nerror trace: \n$(tail -n 3 /tmp/install.log)"
-
-   #NOTE: snapper required a not existing /.snapshots directory for setup!
-   umount /.snapshots
-   rm -r /.snapshots
-
-   snapper -c root create-config /
-   btrfs quota enable /
-
-   # config path: /etc/snapper/configs/root
-   snapper -c root set-config "TIMELINE_CREATE=no"
-   snapper -c root set-config "NUMBER_CLEANUP=yes"
-   snapper -c root set-config "NUMBER_MIN_AGE=0"
-   snapper -c root set-config "NUMBER_LIMIT=10"
-   snapper -c root set-config "NUMBER_LIMIT_IMPORTANT=3"
-
-   systemctl enable snapper-cleanup.timer
-
-   #NOTE: we delete the snapshots directory from snapper and use our own btrfs subvolume
-   btrfs sub delete /.snapshots
-   mkdir /.snapshots
-   mount -a # mount .snapshots from fstab
 }
 
 finalize() {
@@ -335,6 +334,5 @@ installPackages "./pkg.csv"
 installDotfiles
 setupLocale
 systemUpdate  "fix pkg dependecies"
-setup_snapper
 removeTmpSudoInstallPermission
 finalize
